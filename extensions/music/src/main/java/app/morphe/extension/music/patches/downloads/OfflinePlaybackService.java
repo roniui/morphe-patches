@@ -57,6 +57,11 @@ public final class OfflinePlaybackService extends Service {
     private static volatile int currentDuration;
     private static volatile OfflinePlaybackService instance;
 
+    private static final float DUCK_VOLUME = 0.2f;
+    private static final float FULL_VOLUME = 1.0f;
+
+    private boolean shouldResumeAfterFocusGain;
+
     public static void addListener(PlaybackListener listener) {
         listeners.add(listener);
         listener.onPlaybackChanged(currentPath, currentTitle, currentPlaying, currentPosition, currentDuration);
@@ -97,6 +102,7 @@ public final class OfflinePlaybackService extends Service {
     public static void skipNext(Context context) {
         context.startService(new Intent(context, OfflinePlaybackService.class).setAction(ACTION_NEXT));
     }
+
     public static void skipPrevious(Context context) {
         context.startService(new Intent(context, OfflinePlaybackService.class).setAction(ACTION_PREVIOUS));
     }
@@ -108,6 +114,7 @@ public final class OfflinePlaybackService extends Service {
             service.publishState();
         }
     }
+
     public static final String ACTION_PLAY_FILE = "app.morphe.action.PLAY_OFFLINE_FILE";
     public static final String ACTION_TOGGLE = "app.morphe.action.TOGGLE_OFFLINE_PLAYBACK";
     public static final String ACTION_STOP = "app.morphe.action.STOP_OFFLINE_PLAYBACK";
@@ -259,7 +266,10 @@ public final class OfflinePlaybackService extends Service {
     private void resume() {
         if (!playerReady()) return;
         if (audioFocusDenied()) return;
+
         player.start();
+        setPlayerVolume(FULL_VOLUME);
+        shouldResumeAfterFocusGain = false;
         publishState();
         notifyChanged();
     }
@@ -275,6 +285,7 @@ public final class OfflinePlaybackService extends Service {
         releasePlayer();
         progressHandler.removeCallbacks(progressTicker);
         if (audioManager != null && focusRequest != null) audioManager.abandonAudioFocusRequest(focusRequest);
+        shouldResumeAfterFocusGain = false;
         publishedMetadataPath = "";
         if (session != null) {
             session.setPlaybackState(new PlaybackState.Builder().setState(
@@ -290,6 +301,12 @@ public final class OfflinePlaybackService extends Service {
      */
     private boolean playerReady() {
         return prepared && player != null;
+    }
+
+    private void setPlayerVolume(float volume) {
+        if (player != null) {
+            player.setVolume(volume, volume);
+        }
     }
 
     private void openAudioEffectSession(MediaPlayer mediaPlayer) {
@@ -341,10 +358,34 @@ public final class OfflinePlaybackService extends Service {
                 .setAudioAttributes(attributes)
                 .setWillPauseWhenDucked(true)
                 .setOnAudioFocusChangeListener(change -> {
-                    if (change == AudioManager.AUDIOFOCUS_LOSS ||
-                            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
-                            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
-                        pause();
+                    switch (change) {
+                        case AudioManager.AUDIOFOCUS_LOSS:
+                            shouldResumeAfterFocusGain = false;
+                            pause();
+                            break;
+
+                        case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                            shouldResumeAfterFocusGain = playerReady() && player.isPlaying();
+                            pause();
+                            break;
+
+                        case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                            if (playerReady()) {
+                                setPlayerVolume(DUCK_VOLUME);
+                                shouldResumeAfterFocusGain = player.isPlaying();
+                            }
+                            break;
+
+                        case AudioManager.AUDIOFOCUS_GAIN:
+                            setPlayerVolume(FULL_VOLUME);
+                            if (shouldResumeAfterFocusGain) {
+                                resume();
+                            }
+                            shouldResumeAfterFocusGain = false;
+                            break;
+
+                        default:
+                            break;
                     }
                 })
                 .build();
@@ -479,4 +520,4 @@ public final class OfflinePlaybackService extends Service {
     }
 
     @Nullable @Override public IBinder onBind(Intent intent) { return null; }
-}
+    }
