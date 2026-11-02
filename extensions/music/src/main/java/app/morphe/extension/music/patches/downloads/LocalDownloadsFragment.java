@@ -127,6 +127,21 @@ public final class LocalDownloadsFragment extends PreferenceFragment
     @Nullable
     private TextView selectionButton;
 
+    private LinearLayout fullPlayer;
+    private LinearLayout fullQueue;
+    private ImageView fullArtwork;
+    private TextView fullTitle;
+    private TextView fullArtist;
+    private TextView fullCurrentTime;
+    private TextView fullRemainingTime;
+    private SeekBar fullSeek;
+    private ImageButton fullClose;
+    private ImageButton fullPrevious;
+    private ImageButton fullPlay;
+    private ImageButton fullNext;
+    private List<String> activeQueue = new ArrayList<>();
+    private boolean showingFullPlayer;
+
     private boolean showingPause;
 
     /**
@@ -146,6 +161,7 @@ public final class LocalDownloadsFragment extends PreferenceFragment
     private TextView summary;
     private EditText searchBar;
     private boolean userSeeking;
+    private boolean userSeekingFull;
 
     /** How the catalogue is ordered, remembered between visits. */
     private enum SortOrder {
@@ -189,7 +205,12 @@ public final class LocalDownloadsFragment extends PreferenceFragment
 
         miniPlayer = createStockMiniPlayer();
         miniPlayer.setVisibility(View.GONE);
+        miniPlayer.setOnClickListener(v -> openFullPlayer());
         root.addView(miniPlayer, new LinearLayout.LayoutParams(-1, -2));
+
+        fullPlayer = createFullPlayer();
+        fullPlayer.setVisibility(View.GONE);
+        root.addView(fullPlayer, new LinearLayout.LayoutParams(-1, 0, 1));
         return root;
     }
 
@@ -816,6 +837,210 @@ public final class LocalDownloadsFragment extends PreferenceFragment
         return CustomDialog.createRoundedBackground(SEEK_BAR_HEIGHT_DP, color);
     }
 
+    private LinearLayout createFullPlayer() {
+        LinearLayout player = new LinearLayout(getActivity());
+        player.setOrientation(LinearLayout.VERTICAL);
+        player.setBackgroundColor(background());
+        player.setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(18));
+
+        LinearLayout header = new LinearLayout(getActivity());
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        fullClose = ui.icon("yt_outline_experimental_arrow_left_vd_theme_24",
+                str("morphe_music_downloads_close"));
+        fullClose.setOnClickListener(v -> closeFullPlayer());
+        header.addView(fullClose, new LinearLayout.LayoutParams(ui.dp(ICON_BUTTON_DP), ui.dp(ICON_BUTTON_DP)));
+
+        TextView nowPlaying = ui.text(str("morphe_music_downloads_play"), 16, foreground());
+        nowPlaying.setTypeface(Typeface.DEFAULT_BOLD);
+        nowPlaying.setGravity(Gravity.CENTER);
+        header.addView(nowPlaying, new LinearLayout.LayoutParams(0, -2, 1));
+
+        ImageButton queueButton = ui.icon("yt_outline_experimental_playlist_vd_theme_24",
+                str("morphe_music_downloads_queue"));
+        queueButton.setOnClickListener(v -> Utils.showToastShort(str("morphe_music_downloads_queue")));
+        header.addView(queueButton, new LinearLayout.LayoutParams(ui.dp(ICON_BUTTON_DP), ui.dp(ICON_BUTTON_DP)));
+        player.addView(header, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout artColumn = new LinearLayout(getActivity());
+        artColumn.setGravity(Gravity.CENTER);
+        artColumn.setPadding(0, ui.dp(16), 0, ui.dp(8));
+
+        fullArtwork = ui.artworkView(null);
+        fullArtwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        fullArtwork.setLayoutParams(new LinearLayout.LayoutParams(
+                ui.dp(300), ui.dp(300)));
+        artColumn.addView(fullArtwork);
+        player.addView(artColumn, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout titleBlock = new LinearLayout(getActivity());
+        titleBlock.setOrientation(LinearLayout.VERTICAL);
+        titleBlock.setPadding(0, ui.dp(8), 0, 0);
+
+        fullTitle = ui.text("", 28, foreground());
+        fullTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        fullTitle.setSingleLine(true);
+        fullTitle.setGravity(Gravity.CENTER);
+
+        fullArtist = ui.text("", 15, secondary());
+        fullArtist.setSingleLine(true);
+        fullArtist.setGravity(Gravity.CENTER);
+
+        titleBlock.addView(fullTitle);
+        titleBlock.addView(fullArtist);
+        player.addView(titleBlock, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout seekLine = new LinearLayout(getActivity());
+        seekLine.setPadding(0, ui.dp(12), 0, 0);
+        seekLine.setGravity(Gravity.CENTER_VERTICAL);
+
+        fullCurrentTime = ui.text("0:00", 12, secondary());
+        seekLine.addView(fullCurrentTime, new LinearLayout.LayoutParams(-2, -2));
+
+        fullSeek = new SeekBar(getActivity());
+        fullSeek.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
+        fullSeek.setPadding(ui.dp(8), 0, ui.dp(8), 0);
+        fullSeek.setProgressDrawable(createSeekBarDrawable());
+        fullSeek.setThumb(null);
+        fullSeek.setThumbOffset(0);
+        fullSeek.setBackground(null);
+        fullSeek.setSplitTrack(false);
+        fullSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+                userSeekingFull = true;
+                bar.setThumb(createThumb());
+                bar.setThumbOffset(ui.dp(SEEK_THUMB_DP) / 2);
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+                userSeekingFull = false;
+                bar.setThumb(null);
+                OfflinePlaybackService.seekTo(bar.getProgress());
+            }
+
+            @Override
+            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
+            }
+        });
+        seekLine.addView(fullSeek);
+
+        fullRemainingTime = ui.text("0:00", 12, secondary());
+        seekLine.addView(fullRemainingTime, new LinearLayout.LayoutParams(-2, -2));
+        player.addView(seekLine, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout controls = new LinearLayout(getActivity());
+        controls.setGravity(Gravity.CENTER);
+        controls.setPadding(0, ui.dp(18), 0, ui.dp(16));
+
+        fullPrevious = ui.icon("yt_fill_experimental_skip_previous_vd_theme_24",
+                str("morphe_music_downloads_previous"));
+        fullPrevious.setOnClickListener(v -> OfflinePlaybackService.skipPrevious(getActivity()));
+        controls.addView(fullPrevious, new LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)));
+
+        fullPlay = ui.icon("yt_fill_experimental_play_vd_theme_24",
+                str("morphe_music_downloads_play_pause"));
+        fullPlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        fullPlay.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
+        fullPlay.setOnClickListener(v -> OfflinePlaybackService.toggle(getActivity()));
+        controls.addView(fullPlay, new LinearLayout.LayoutParams(ui.dp(74), ui.dp(74)));
+
+        fullNext = ui.icon("yt_fill_experimental_skip_next_vd_theme_24",
+                str("morphe_music_downloads_next"));
+        fullNext.setOnClickListener(v -> OfflinePlaybackService.skipNext(getActivity()));
+        controls.addView(fullNext, new LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)));
+        player.addView(controls, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView queueHeader = ui.text(str("morphe_music_downloads_queue"), 14, secondary());
+        queueHeader.setTypeface(Typeface.DEFAULT_BOLD);
+        queueHeader.setPadding(0, ui.dp(8), 0, ui.dp(8));
+        player.addView(queueHeader, new LinearLayout.LayoutParams(-1, -2));
+
+        fullQueue = new LinearLayout(getActivity());
+        fullQueue.setOrientation(LinearLayout.VERTICAL);
+
+        ScrollView queueScroll = new ScrollView(getActivity());
+        queueScroll.addView(fullQueue);
+        player.addView(queueScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        return player;
+    }
+
+    private void openFullPlayer() {
+        if (!playingPath.isEmpty() && fullPlayer != null) {
+            catalogue.setVisibility(View.GONE);
+            miniPlayer.setVisibility(View.GONE);
+            fullPlayer.setVisibility(View.VISIBLE);
+            showingFullPlayer = true;
+
+            OfflineTrack current = findByPath(playingPath);
+            if (current != null) applyFullPlayerTrack(current);
+        }
+    }
+
+    private void closeFullPlayer() {
+        if (fullPlayer == null) return;
+        fullPlayer.setVisibility(View.GONE);
+        catalogue.setVisibility(View.VISIBLE);
+        miniPlayer.setVisibility(playingPath.isEmpty() ? View.GONE : View.VISIBLE);
+        showingFullPlayer = false;
+    }
+
+    private void applyFullPlayerTrack(OfflineTrack track) {
+        if (fullTitle == null || fullArtist == null || fullArtwork == null) return;
+
+        fullTitle.setText(track.displayTitle());
+        fullArtist.setText(track.displayArtist());
+        Bitmap cover = track.artwork(ROW_ARTWORK_PIXELS * 4);
+        if (cover != null) {
+            fullArtwork.setImageBitmap(cover);
+            fullArtwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        } else {
+            fullArtwork.setImageDrawable(
+                    ResourceUtils.getDrawable("yt_fill_experimental_play_circle_vd_theme_24"));
+            fullArtwork.setColorFilter(foreground());
+            fullArtwork.setPadding(ui.dp(32), ui.dp(32), ui.dp(32), ui.dp(32));
+        }
+        refreshQueueList();
+    }
+
+    private void refreshQueueList() {
+        if (fullQueue == null) return;
+        fullQueue.removeAllViews();
+
+        if (activeQueue.isEmpty()) {
+            TextView empty = ui.text(str("morphe_music_downloads_empty"), 14, secondary());
+            empty.setPadding(0, ui.dp(12), 0, ui.dp(12));
+            fullQueue.addView(empty);
+            return;
+        }
+
+        for (String path : activeQueue) {
+            File file = new File(path);
+            if (!file.exists()) continue;
+            OfflineTrack track = OfflineTrack.load(file);
+            LinearLayout row = ui.trackRow();
+            row.setPadding(ui.dp(8), ui.dp(6), ui.dp(8), ui.dp(6));
+            row.setOnClickListener(v -> play(track, activeQueue));
+
+            ImageView artwork = ui.artworkView(track.artwork(ROW_ARTWORK_PIXELS));
+            artwork.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
+            row.addView(artwork);
+
+            LinearLayout labels = new LinearLayout(getActivity());
+            labels.setOrientation(LinearLayout.VERTICAL);
+            labels.setPadding(ui.dp(12), 0, 0, 0);
+            TextView title = ui.text(track.displayTitle(), 14, foreground());
+            title.setSingleLine(true);
+            TextView detail = ui.text(track.displayArtist(), 12, secondary());
+            detail.setSingleLine(true);
+            labels.addView(title);
+            labels.addView(detail);
+            row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+            fullQueue.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        }
+    }
+
     private void showTrackMenu(View anchor, OfflineTrack track) {
         String[] items = {
                 str("morphe_music_downloads_play"),
@@ -938,9 +1163,11 @@ public final class LocalDownloadsFragment extends PreferenceFragment
      */
     void play(OfflineTrack track, List<String> queuePaths) {
         try {
+            activeQueue = new ArrayList<>(queuePaths);
             final int queueIndex = Math.max(0, queuePaths.indexOf(track.audioFile().getAbsolutePath()));
             OfflinePlaybackService.play(getActivity(), track, new ArrayList<>(queuePaths), queueIndex);
             applyTrackVisuals(track);
+            if (showingFullPlayer) applyFullPlayerTrack(track);
         } catch (Exception ex) {
             Logger.printException(() -> "Offline playback failed: " + track.audioFile(), ex);
             Utils.showToastShort(str("morphe_music_downloads_play_failed"));
@@ -966,17 +1193,34 @@ public final class LocalDownloadsFragment extends PreferenceFragment
 
                 markPlayingRow();
                 if (playlistPage != null) playlistPage.markPlayingRow(path);
+                if (showingFullPlayer && track != null) applyFullPlayerTrack(track);
             }
 
             // Not only on a new track, since the same track can be played from another queue.
             setButtonEnabled(miniPrevious, OfflinePlaybackService.hasPrevious());
             setButtonEnabled(miniNext, OfflinePlaybackService.hasNext());
+            setButtonEnabled(fullPrevious, OfflinePlaybackService.hasPrevious());
+            setButtonEnabled(fullNext, OfflinePlaybackService.hasNext());
 
             // This runs on every playback tick, so the icon only morphs when the state
             // actually flips while the bar is on screen to see it happen.
             updatePlayIcon(playing, wasVisible && playing != showingPause);
+            if (fullPlay != null) {
+                fullPlay.setImageDrawable(ResourceUtils.getDrawable(
+                        playing ? "yt_fill_experimental_pause_vd_theme_24"
+                                : "yt_fill_experimental_play_vd_theme_24"));
+            }
             miniSeek.setMax(Math.max(1, duration));
             if (!userSeeking) miniSeek.setProgress(position, true);
+
+            if (fullSeek != null) {
+                fullSeek.setMax(Math.max(1, duration));
+                if (!userSeekingFull) fullSeek.setProgress(position, true);
+                int seconds = Math.max(0, position / 1000);
+                int remaining = Math.max(0, (duration - position) / 1000);
+                fullCurrentTime.setText(OfflineUi.formatDuration(seconds));
+                fullRemainingTime.setText("-" + OfflineUi.formatDuration(remaining));
+            }
         });
     }
 
@@ -1027,6 +1271,7 @@ public final class LocalDownloadsFragment extends PreferenceFragment
     }
 
     private void setButtonEnabled(ImageButton button, boolean enabled) {
+        if (button == null) return;
         button.setEnabled(enabled);
         button.setAlpha(enabled ? 1f : .35f);
     }
