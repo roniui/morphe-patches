@@ -230,6 +230,7 @@ public final class OfflinePlaybackService extends Service {
                 prepared = true;
                 openAudioEffectSession(mp);
                 mp.start();
+                setPlayerVolume(FULL_VOLUME);
                 publishState();
                 startForeground(NOTIFICATION_ID, notification());
                 progressHandler.removeCallbacks(progressTicker);
@@ -275,9 +276,12 @@ public final class OfflinePlaybackService extends Service {
     }
 
     private void pause() {
+        pause(false);
+    }
+
+    private void pause(boolean keepResumeState) {
         if (!playerReady() || !player.isPlaying()) return;
-        // User manually paused, so clear focus resume flag to prevent auto-resume
-        shouldResumeAfterFocusGain = false;
+        if (!keepResumeState) shouldResumeAfterFocusGain = false;
         player.pause();
         publishState();
         notifyChanged();
@@ -289,10 +293,8 @@ public final class OfflinePlaybackService extends Service {
         if (audioManager != null && focusRequest != null) audioManager.abandonAudioFocusRequest(focusRequest);
         shouldResumeAfterFocusGain = false;
         publishedMetadataPath = "";
-        if (session != null) {
-            session.setPlaybackState(new PlaybackState.Builder().setState(
-                    PlaybackState.STATE_STOPPED, 0, 0).build());
-        }
+        if (session != null) session.setPlaybackState(new PlaybackState.Builder().setState(
+                PlaybackState.STATE_STOPPED, 0, 0).build());
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
@@ -306,9 +308,7 @@ public final class OfflinePlaybackService extends Service {
     }
 
     private void setPlayerVolume(float volume) {
-        if (player != null) {
-            player.setVolume(volume, volume);
-        }
+        if (player != null) player.setVolume(volume, volume);
     }
 
     private void openAudioEffectSession(MediaPlayer mediaPlayer) {
@@ -339,7 +339,6 @@ public final class OfflinePlaybackService extends Service {
 
         MediaPlayer released = player;
         if (released == null) return;
-
         // Cleared first, otherwise releasing a player that is still preparing reports an error
         // that would stop whatever is playing by then.
         player = null;
@@ -362,37 +361,28 @@ public final class OfflinePlaybackService extends Service {
                 .setOnAudioFocusChangeListener(change -> {
                     switch (change) {
                         case AudioManager.AUDIOFOCUS_LOSS:
-                            // Permanent loss (e.g. another music app started playing)
                             shouldResumeAfterFocusGain = false;
-                            pause();
+                            pause(true);
                             break;
-
                         case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                            // Temporary loss (e.g. phone call or short notification)
                             shouldResumeAfterFocusGain = playerReady() && player.isPlaying();
-                            pause();
+                            pause(true);
                             break;
-
                         case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                            // Ducking (e.g. navigation prompt speaking over music)
                             if (playerReady()) {
                                 setPlayerVolume(DUCK_VOLUME);
-                                // Only track resume state if we were actively playing
-                                if (!shouldResumeAfterFocusGain) {
-                                    shouldResumeAfterFocusGain = player.isPlaying();
-                                }
+                                shouldResumeAfterFocusGain = player.isPlaying();
                             }
                             break;
-
                         case AudioManager.AUDIOFOCUS_GAIN:
-                            // Focus regained; restore full volume and resume if needed
                             setPlayerVolume(FULL_VOLUME);
-                            if (shouldResumeAfterFocusGain) {
-                                resume();
+                            if (shouldResumeAfterFocusGain && playerReady()) {
+                                player.start();
+                                publishState();
+                                notifyChanged();
                             }
                             shouldResumeAfterFocusGain = false;
                             break;
-
                         default:
                             break;
                     }
@@ -529,4 +519,4 @@ public final class OfflinePlaybackService extends Service {
     }
 
     @Nullable @Override public IBinder onBind(Intent intent) { return null; }
-    }
+                               }
