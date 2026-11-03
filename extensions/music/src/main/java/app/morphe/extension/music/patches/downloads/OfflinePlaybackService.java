@@ -23,9 +23,9 @@ import android.graphics.drawable.Icon;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.media.MediaMetadata;
 import android.media.audiofx.AudioEffect;
-import android.media.MediaPlayer;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Handler;
@@ -38,6 +38,7 @@ import androidx.annotation.Nullable;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 
@@ -48,6 +49,10 @@ public final class OfflinePlaybackService extends Service {
     public interface PlaybackListener {
         void onPlaybackChanged(String path, String title, boolean playing, int position, int duration);
     }
+
+    public static final int REPEAT_OFF = 0;
+    public static final int REPEAT_ALL = 1;
+    public static final int REPEAT_ONE = 2;
 
     private static final Set<PlaybackListener> listeners = new CopyOnWriteArraySet<>();
     private static volatile String currentPath = "";
@@ -61,6 +66,8 @@ public final class OfflinePlaybackService extends Service {
     private static final float FULL_VOLUME = 1.0f;
 
     private boolean shouldResumeAfterFocusGain;
+    private boolean shuffleEnabled;
+    private int repeatMode = REPEAT_OFF;
 
     public static void addListener(PlaybackListener listener) {
         listeners.add(listener);
@@ -69,10 +76,7 @@ public final class OfflinePlaybackService extends Service {
 
     public static void removeListener(PlaybackListener listener) { listeners.remove(listener); }
 
-    /**
-     * @param queue      The tracks that Previous and Next move through, including this track.
-     * @param queueIndex The position of this track in the queue.
-     */
+    /** @param queue The tracks that Previous and Next move through, including this track. */
     static void play(Context context, OfflineTrack track, ArrayList<String> queue, int queueIndex) {
         context.startForegroundService(new Intent(context, OfflinePlaybackService.class)
                 .setAction(ACTION_PLAY_FILE)
@@ -86,13 +90,25 @@ public final class OfflinePlaybackService extends Service {
 
     static boolean hasPrevious() {
         OfflinePlaybackService service = instance;
-        return service != null && service.queueIndex > 0;
+        return service != null && (service.shuffleEnabled
+                ? service.queue.size() > 1 : service.queueIndex > 0);
     }
 
     static boolean hasNext() {
         OfflinePlaybackService service = instance;
-        return service != null && service.queueIndex >= 0
-                && service.queueIndex + 1 < service.queue.size();
+        return service != null && (service.shuffleEnabled
+                ? service.queue.size() > 1
+                : service.queueIndex >= 0 && service.queueIndex + 1 < service.queue.size());
+    }
+
+    public static boolean isShuffleEnabled() {
+        OfflinePlaybackService service = instance;
+        return service != null && service.shuffleEnabled;
+    }
+
+    public static int getRepeatMode() {
+        OfflinePlaybackService service = instance;
+        return service == null ? REPEAT_OFF : service.repeatMode;
     }
 
     public static void toggle(Context context) {
@@ -105,6 +121,14 @@ public final class OfflinePlaybackService extends Service {
 
     public static void skipPrevious(Context context) {
         context.startService(new Intent(context, OfflinePlaybackService.class).setAction(ACTION_PREVIOUS));
+    }
+
+    public static void toggleShuffle(Context context) {
+        context.startService(new Intent(context, OfflinePlaybackService.class).setAction(ACTION_SHUFFLE));
+    }
+
+    public static void cycleRepeat(Context context) {
+        context.startService(new Intent(context, OfflinePlaybackService.class).setAction(ACTION_REPEAT));
     }
 
     public static void seekTo(int position) {
@@ -120,6 +144,8 @@ public final class OfflinePlaybackService extends Service {
     public static final String ACTION_STOP = "app.morphe.action.STOP_OFFLINE_PLAYBACK";
     public static final String ACTION_NEXT = "app.morphe.action.NEXT_OFFLINE_TRACK";
     public static final String ACTION_PREVIOUS = "app.morphe.action.PREVIOUS_OFFLINE_TRACK";
+    public static final String ACTION_SHUFFLE = "app.morphe.action.SHUFFLE_OFFLINE_PLAYBACK";
+    public static final String ACTION_REPEAT = "app.morphe.action.REPEAT_OFFLINE_PLAYBACK";
     public static final String EXTRA_PATH = "path";
     public static final String EXTRA_QUEUE = "queue";
     public static final String EXTRA_QUEUE_INDEX = "queue_index";
@@ -196,6 +222,12 @@ public final class OfflinePlaybackService extends Service {
             playQueueOffset(1);
         } else if (ACTION_PREVIOUS.equals(action)) {
             playQueueOffset(-1);
+        } else if (ACTION_SHUFFLE.equals(action)) {
+            shuffleEnabled = !shuffleEnabled;
+            notifyChanged();
+        } else if (ACTION_REPEAT.equals(action)) {
+            repeatMode = (repeatMode + 1) % (REPEAT_ONE + 1);
+            notifyChanged();
         }
         return START_NOT_STICKY;
     }
@@ -206,11 +238,8 @@ public final class OfflinePlaybackService extends Service {
         this.path = path;
         title = requestedTitle == null ? new File(path).getName() : requestedTitle;
         artist = requestedArtist == null || requestedArtist.isBlank() ? "YouTube Music" : requestedArtist;
-        // A track saved without a cover has no file, and decoding it would log an error a second.
         File artworkFile = artworkPath == null ? null : new File(artworkPath);
-        artwork = artworkFile != null && artworkFile.isFile()
-                ? BitmapFactory.decodeFile(artworkPath)
-                : null;
+        artwork = artworkFile != null && artworkFile.isFile() ? BitmapFactory.decodeFile(artworkPath) : null;
         releasePlayer();
         try {
             pauseOtherMedia();
@@ -219,12 +248,8 @@ public final class OfflinePlaybackService extends Service {
             player.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
             player.setAudioAttributes(new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build());
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
             player.setDataSource(path);
-            // Skipping quickly leaves the previous player mid prepare. Its callbacks are
-            // cleared on release, and each one still checks that it belongs to the current
-            // track, so a discarded player can never tear down the one that replaced it.
             player.setOnPreparedListener(mp -> {
                 if (mp != player) return;
                 prepared = true;
@@ -238,8 +263,18 @@ public final class OfflinePlaybackService extends Service {
             });
             player.setOnCompletionListener(mp -> {
                 if (mp != player) return;
-                if (queueIndex >= 0 && queueIndex + 1 < queue.size()) playQueueOffset(1);
-                else stopPlayback();
+                if (repeatMode == REPEAT_ONE) {
+                    mp.seekTo(0);
+                    mp.start();
+                    publishState();
+                } else if (queueIndex >= 0 && queueIndex + 1 < queue.size()) {
+                    playQueueOffset(1);
+                } else if (repeatMode == REPEAT_ALL && !queue.isEmpty()) {
+                    queueIndex = 0;
+                    playQueueIndex(queueIndex);
+                } else {
+                    stopPlayback();
+                }
             });
             player.setOnErrorListener((mp, what, extra) -> {
                 if (mp != player) return true;
@@ -256,18 +291,32 @@ public final class OfflinePlaybackService extends Service {
     }
 
     private void playQueueOffset(int offset) {
-        int target = queueIndex + offset;
-        if (target < 0 || target >= queue.size()) return;
+        if (queue.isEmpty()) return;
+        int target;
+        if (shuffleEnabled && queue.size() > 1) {
+            do {
+                target = (int) (Math.random() * queue.size());
+            } while (target == queueIndex);
+        } else {
+            target = queueIndex + offset;
+            if (target < 0 || target >= queue.size()) {
+                if (offset > 0 && repeatMode == REPEAT_ALL) target = 0;
+                else if (offset < 0 && repeatMode == REPEAT_ALL) target = queue.size() - 1;
+                else return;
+            }
+        }
         queueIndex = target;
-        OfflineTrack track = OfflineTrack.load(new File(queue.get(target)));
+        playQueueIndex(target);
+    }
+
+    private void playQueueIndex(int index) {
+        OfflineTrack track = OfflineTrack.load(new File(queue.get(index)));
         playFile(track.audioFile().getAbsolutePath(), track.displayTitle(), track.displayArtist(),
                 track.artworkFile().getAbsolutePath());
     }
 
     private void resume() {
-        if (!playerReady()) return;
-        if (audioFocusDenied()) return;
-
+        if (!playerReady() || audioFocusDenied()) return;
         player.start();
         setPlayerVolume(FULL_VOLUME);
         shouldResumeAfterFocusGain = false;
@@ -275,9 +324,7 @@ public final class OfflinePlaybackService extends Service {
         notifyChanged();
     }
 
-    private void pause() {
-        pause(false);
-    }
+    private void pause() { pause(false); }
 
     private void pause(boolean keepResumeState) {
         if (!playerReady() || !player.isPlaying()) return;
@@ -293,28 +340,24 @@ public final class OfflinePlaybackService extends Service {
         if (audioManager != null && focusRequest != null) audioManager.abandonAudioFocusRequest(focusRequest);
         shouldResumeAfterFocusGain = false;
         publishedMetadataPath = "";
-        if (session != null) session.setPlaybackState(new PlaybackState.Builder().setState(
-                PlaybackState.STATE_STOPPED, 0, 0).build());
+        currentPath = "";
+        currentTitle = "";
+        currentPlaying = false;
+        currentPosition = 0;
+        currentDuration = 0;
+        if (session != null) session.setPlaybackState(new PlaybackState.Builder()
+                .setState(PlaybackState.STATE_STOPPED, 0, 0).build());
+        for (PlaybackListener listener : listeners) listener.onPlaybackChanged("", "", false, 0, 0);
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
-    /**
-     * Asking a player that is still preparing about its state is an invalid operation, which it
-     * answers with an error that stops playback, so nothing may reach it before it is ready.
-     */
-    private boolean playerReady() {
-        return prepared && player != null;
-    }
-
-    private void setPlayerVolume(float volume) {
-        if (player != null) player.setVolume(volume, volume);
-    }
+    private boolean playerReady() { return prepared && player != null; }
+    private void setPlayerVolume(float volume) { if (player != null) player.setVolume(volume, volume); }
 
     private void openAudioEffectSession(MediaPlayer mediaPlayer) {
         int sessionId = mediaPlayer.getAudioSessionId();
         if (sessionId <= 0) return;
-
         audioEffectSessionId = sessionId;
         sendBroadcast(new Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
                 .putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
@@ -325,7 +368,6 @@ public final class OfflinePlaybackService extends Service {
     private void closeAudioEffectSession() {
         int sessionId = audioEffectSessionId;
         if (sessionId <= 0) return;
-
         audioEffectSessionId = 0;
         sendBroadcast(new Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
                 .putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
@@ -336,11 +378,8 @@ public final class OfflinePlaybackService extends Service {
         prepared = false;
         progressHandler.removeCallbacks(progressTicker);
         closeAudioEffectSession();
-
         MediaPlayer released = player;
         if (released == null) return;
-        // Cleared first, otherwise releasing a player that is still preparing reports an error
-        // that would stop whatever is playing by then.
         player = null;
         released.setOnPreparedListener(null);
         released.setOnCompletionListener(null);
@@ -353,8 +392,7 @@ public final class OfflinePlaybackService extends Service {
         if (audioManager == null) return;
         AudioAttributes attributes = new AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build();
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build();
         focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(attributes)
                 .setWillPauseWhenDucked(true)
@@ -386,41 +424,32 @@ public final class OfflinePlaybackService extends Service {
                         default:
                             break;
                     }
-                })
-                .build();
+                }).build();
     }
 
-    /**
-     * @return Whether the system refused audio focus, so playback must not start.
-     */
     private boolean audioFocusDenied() {
         return audioManager == null || focusRequest == null
                 || audioManager.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
     }
 
-    /** Pause the currently routed system player before this session becomes active. */
     private void pauseOtherMedia() {
         if (audioManager == null || !audioManager.isMusicActive()) return;
-        KeyEvent down = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE);
-        KeyEvent up = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE);
-        audioManager.dispatchMediaKeyEvent(down);
-        audioManager.dispatchMediaKeyEvent(up);
+        audioManager.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE));
+        audioManager.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE));
     }
 
     private void publishState() {
         MediaSession currentSession = session;
         if (currentSession == null) return;
-
         final boolean playing = playerReady() && player.isPlaying();
         final long position = playerReady() ? player.getCurrentPosition() : 0;
         currentSession.setPlaybackState(new PlaybackState.Builder()
-                .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE |
-                        PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_STOP |
-                        PlaybackState.ACTION_SEEK_TO | PlaybackState.ACTION_SKIP_TO_NEXT |
-                        PlaybackState.ACTION_SKIP_TO_PREVIOUS)
+                .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
+                        | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_STOP
+                        | PlaybackState.ACTION_SEEK_TO | PlaybackState.ACTION_SKIP_TO_NEXT
+                        | PlaybackState.ACTION_SKIP_TO_PREVIOUS)
                 .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
-                        position, playing ? 1f : 0f)
-                .build());
+                        position, playing ? 1f : 0f).build());
         currentPath = path == null ? "" : path;
         currentTitle = title;
         currentPlaying = playing;
@@ -429,18 +458,15 @@ public final class OfflinePlaybackService extends Service {
         for (PlaybackListener listener : listeners) {
             listener.onPlaybackChanged(currentPath, currentTitle, currentPlaying, currentPosition, currentDuration);
         }
-        // Rebuilding the metadata copies the artwork, so only do it when the track changed.
         if (!currentPath.equals(publishedMetadataPath)) {
             publishedMetadataPath = currentPath;
             MediaMetadata.Builder metadata = new MediaMetadata.Builder()
                     .putString(MediaMetadata.METADATA_KEY_TITLE, title)
                     .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
                     .putLong(MediaMetadata.METADATA_KEY_DURATION, currentDuration);
-            if (artwork != null) {
-                metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
-                        .putBitmap(MediaMetadata.METADATA_KEY_ART, artwork)
-                        .putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork);
-            }
+            if (artwork != null) metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
+                    .putBitmap(MediaMetadata.METADATA_KEY_ART, artwork)
+                    .putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork);
             currentSession.setMetadata(metadata.build());
         }
     }
@@ -457,49 +483,38 @@ public final class OfflinePlaybackService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_headset)
-                .setContentTitle(title)
-                .setContentText(artist)
-                .setLargeIcon(artwork)
-                .setContentIntent(content)
-                .setCategory(Notification.CATEGORY_TRANSPORT)
-                .setVisibility(Notification.VISIBILITY_PUBLIC)
-                .setOnlyAlertOnce(true)
-                .setShowWhen(false)
-                .setOngoing(true)
+                .setContentTitle(title).setContentText(artist).setLargeIcon(artwork)
+                .setContentIntent(content).setCategory(Notification.CATEGORY_TRANSPORT)
+                .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true)
+                .setShowWhen(false).setOngoing(true)
                 .addAction(action(android.R.drawable.ic_media_previous,
                         str("morphe_music_downloads_previous"), previous))
-                .addAction(action(
-                        playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
-                        str(playing ? "morphe_music_downloads_pause" : "morphe_music_downloads_play"),
-                        toggle))
+                .addAction(action(playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
+                        str(playing ? "morphe_music_downloads_pause" : "morphe_music_downloads_play"), toggle))
                 .addAction(action(android.R.drawable.ic_media_next,
                         str("morphe_music_downloads_next"), next))
                 .addAction(action(android.R.drawable.ic_menu_close_clear_cancel,
                         str("morphe_music_downloads_close"), stop))
                 .setStyle(new Notification.MediaStyle().setMediaSession(session.getSessionToken())
-                        .setShowActionsInCompactView(0, 1, 2))
-                .build();
+                        .setShowActionsInCompactView(0, 1, 2)).build();
     }
 
     private Notification.Action action(int iconResource, String title, PendingIntent intent) {
-        return new Notification.Action.Builder(
-                Icon.createWithResource(this, iconResource), title, intent).build();
+        return new Notification.Action.Builder(Icon.createWithResource(this, iconResource), title, intent).build();
     }
 
     private PendingIntent serviceIntent(String action, int code) {
         Intent intent = new Intent(this, OfflinePlaybackService.class).setAction(action);
-        //noinspection WrongConstant
         return PendingIntent.getService(this, code, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    @SuppressLint("NotificationPermission") // The patch declares POST_NOTIFICATIONS.
+    @SuppressLint("NotificationPermission")
     private void notifyChanged() {
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION_ID, notification());
     }
 
     private void createChannel() {
-        //noinspection WrongConstant
         NotificationChannel channel = new NotificationChannel(CHANNEL_ID,
                 str("morphe_music_downloads_playback_channel"), NotificationManager.IMPORTANCE_LOW);
         channel.setSound(null, null);
